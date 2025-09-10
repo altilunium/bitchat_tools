@@ -10,7 +10,7 @@
     body{background:linear-gradient(180deg,#071124 0%, #071827 100%);color:#e6eef8;padding:18px}
     .app{max-width:920px;margin:0 auto}
     h1{font-size:20px;margin:6px 0 14px}
-    .row{display:flex;gap:12px;align-items:center}
+    .row{display:flex;gap:12px;align-items:center;flex-direction: column}
     input,textarea,select,button{font:inherit}
     .card{background:var(--card);padding:12px;border-radius:10px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
     label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
@@ -36,9 +36,9 @@
     <div class="card">
       <h1>Minimal Nostr Relay Connector</h1>
       <div class="row">
-        <div style="flex:1">
+        <div style="flex:1; width:80%">
           <label for="relay">Relay URL</label>
-          <input id="relay" type="url" value="wss://nostr-02.dorafactory.org" placeholder="wss://example.com" />
+          <input id="relay" type="url" value="nostr-02.dorafactory.org" placeholder="wss://example.com" />
         </div>
         <div style="width:230px">
           <label for="filterKind">Subscribe: kind</label>
@@ -52,7 +52,7 @@
           </div>
         </div>
       </div>
-      <div style="margin-top:8px">
+      <div style="margin-top:8px; display:none">
         <label for="advancedFilter">Advanced Filter (JSON)</label>
         <textarea id="advancedFilter" placeholder='{"kinds":[1],"authors":["pubkey"]}'></textarea>
       </div>
@@ -95,7 +95,7 @@
       const statusEl = $('status');
       const connectBtn = $('connectBtn');
       const disconnectBtn = $('disconnectBtn');
-      const relayInput = $('relay');
+      const relayInput =  $('relay');
       const filterKind = $('filterKind');
       const advancedFilterInput = $('advancedFilter');
       const privInput = $('privkey');
@@ -140,7 +140,8 @@
       function setStatus(text){ statusEl.textContent = text }
 
       function connect(){
-        const url = relayInput.value.trim();
+        var url = relayInput.value.trim();
+        url = "wss://" + url  
         if(!url){ alert('Please enter a relay URL'); return }
         if(ws){ addLogMessage('<small>Already connected. Disconnect first.</small>'); return }
         try{
@@ -158,7 +159,7 @@
           try{
             const data = JSON.parse(ev.data);
             handleMessage(data);
-          }catch(err){ addLogMessage('<small>Non-JSON message: '+ev.data+'</small>') }
+          }catch(err){ /*addLogMessage('<small>Non-JSON message: '+ev.data+'</small>')*/ }
         });
         ws.addEventListener('close',()=>{
           addLogMessage('<small>CLOSED connection to '+url+'</small>');
