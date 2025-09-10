@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Minimal Nostr Relay Connector</title>
+  <style>
+    :root{--bg:#0f1724;--card:#111827;--muted:#9ca3af;--accent:#60a5fa}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial}
+    body{background:linear-gradient(180deg,#071124 0%, #071827 100%);color:#e6eef8;padding:18px}
+    .app{max-width:920px;margin:0 auto}
+    h1{font-size:20px;margin:6px 0 14px}
+    .row{display:flex;gap:12px;align-items:center}
+    input,textarea,select,button{font:inherit}
+    .card{background:var(--card);padding:12px;border-radius:10px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+    label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+    input[type=text],input[type=url],select,textarea{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+    textarea{min-height:84px;resize:vertical}
+    .controls{display:flex;gap:8px}
+    button{background:var(--accent);border:none;padding:6px 10px;border-radius:8px;color:#08233a;cursor:pointer;font-size:13px}
+    button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+    .status{font-size:13px;color:var(--muted);margin-top:8px}
+    .log{max-height:360px;overflow:auto;padding:8px;border-radius:8px;background:rgba(255,255,255,0.02);margin-top:10px}
+    .event{border-bottom:1px dashed rgba(255,255,255,0.02);padding:8px 0}
+    .event small{color:var(--muted)}
+    .meta{font-size:12px;color:var(--muted)}
+    .flex{display:flex;gap:8px}
+    .col{flex:1}
+    .footer{margin-top:12px;font-size:12px;color:var(--muted)}
+    .danger{background:#f87171;color:#1b1b1b}
+    pre{background:rgba(0,0,0,0.4);padding:6px;border-radius:6px;white-space:pre-wrap;word-break:break-word}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>Minimal Nostr Relay Connector</h1>
+      <div class="row">
+        <div style="flex:1">
+          <label for="relay">Relay URL</label>
+          <input id="relay" type="url" value="wss://nostr-02.dorafactory.org" placeholder="wss://example.com" />
+        </div>
+        <div style="width:230px">
+          <label for="filterKind">Subscribe: kind</label>
+          <select id="filterKind"><option value="1">Kind 1 (text note)</option><option value="0">Kind 0 (metadata)</option><option value="3">Kind 3 (contacts)</option><option value="20000">Kind 20000 (ephemeral)</option><option value="">All</option></select>
+        </div>
+        <div style="width:120px">
+          <label>&nbsp;</label>
+          <div class="controls">
+            <button id="connectBtn">Connect</button>
+            <button id="disconnectBtn" class="ghost">Disconnect</button>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <label for="advancedFilter">Advanced Filter (JSON)</label>
+        <textarea id="advancedFilter" placeholder='{"kinds":[1],"authors":["pubkey"]}'></textarea>
+      </div>
+      <div class="status" id="status">Not connected</div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <label for="privkey">Private Key (hex) — optional (paste to enable signing/publishing)</label>
+          <input id="privkey" type="text" placeholder="e.g. 32-byte hex (do not share)" />
+        </div>
+        <div style="width:160px">
+          <label for="pubKey">Derived Public Key</label>
+          <input id="pubKey" type="text" readonly />
+        </div>
+      </div>
+
+      <div style="height:10px"></div>
+
+      <label for="note">Write a text note (Kind 1)</label>
+      <textarea id="note" placeholder="Hello Nostr — this app will sign (if privkey provided) and publish"></textarea>
+      <div class="flex" style="margin-top:8px">
+        <button id="publishBtn">Publish Note</button>
+        <button id="clearLogBtn" class="ghost">Clear Log</button>
+        <button id="exampleBtn" class="ghost">Insert Example</button>
+      </div>
+      <div class="footer">This is an educational/simple single-file app. Be careful with private keys; do not paste keys you are not willing to expose to this device/browser.</div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/nostr-tools@2.1.4/dist/nostr-tools.min.js"></script>
+  <script>
+    (function(){
+      const $ = id => document.getElementById(id);
+      const logEl = $('log');
+      const statusEl = $('status');
+      const connectBtn = $('connectBtn');
+      const disconnectBtn = $('disconnectBtn');
+      const relayInput = $('relay');
+      const filterKind = $('filterKind');
+      const advancedFilterInput = $('advancedFilter');
+      const privInput = $('privkey');
+      const pubInput = $('pubKey');
+      const noteInput = $('note');
+      const publishBtn = $('publishBtn');
+      const clearLogBtn = $('clearLogBtn');
+      const exampleBtn = $('exampleBtn');
+
+      let ws = null;
+      let subId = null;
+      let connectedRelay = null;
+      let events = [];
+
+      function renderLog(){
+        logEl.innerHTML = '';
+        const sorted = [...events].sort((a,b)=>b.created_at - a.created_at);
+        for(const ev of sorted){
+          const time = new Date((ev.created_at||0)*1000).toLocaleString();
+          const pubkey = ev.pubkey || '';
+          const id = ev.id || '';
+          let content = escapeHtml(ev.content||'');
+          const evStr = JSON.stringify(ev,null,2);
+          const html = `
+            <div class="event">
+              <strong>Event</strong> <small>${time}</small>
+              <div class="meta">id: ${id} — pubkey: ${short(pubkey)}</div>
+              <div style="margin-top:6px">${content}</div>
+              <button class="ghost" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">Show RAW</button>
+              <pre style="display:none">${escapeHtml(evStr)}</pre>
+            </div>`;
+          logEl.insertAdjacentHTML('beforeend', html);
+        }
+      }
+
+      function addLogMessage(html){
+        const d = document.createElement('div'); d.className='event'; d.innerHTML = html; logEl.prepend(d);
+      }
+
+      function setStatus(text){ statusEl.textContent = text }
+
+      function connect(){
+        const url = relayInput.value.trim();
+        if(!url){ alert('Please enter a relay URL'); return }
+        if(ws){ addLogMessage('<small>Already connected. Disconnect first.</small>'); return }
+        try{
+          ws = new WebSocket(url);
+        }catch(e){ addLogMessage('<small>Failed to construct WebSocket: '+e+'</small>'); ws=null; return }
+
+        setStatus('Connecting to '+url+'...');
+        ws.addEventListener('open',()=>{
+          connectedRelay = url;
+          setStatus('Connected to '+url);
+          addLogMessage('<div><strong>OPEN</strong> — '+url+' </div>');
+          subscribe();
+        });
+        ws.addEventListener('message',(ev)=>{
+          try{
+            const data = JSON.parse(ev.data);
+            handleMessage(data);
+          }catch(err){ addLogMessage('<small>Non-JSON message: '+ev.data+'</small>') }
+        });
+        ws.addEventListener('close',()=>{
+          addLogMessage('<small>CLOSED connection to '+url+'</small>');
+          setStatus('Disconnected');
+          ws=null; connectedRelay=null;
+        });
+        ws.addEventListener('error',(e)=>{
+          addLogMessage('<small>WebSocket error</small>');
+        });
+      }
+
+      function disconnect(){
+        if(!ws) return;
+        try{ if(subId) { ws.send(JSON.stringify(['CLOSE', subId])); subId=null } }catch(e){}
+        ws.close(); ws=null; setStatus('Disconnected'); addLogMessage('<small>Manually disconnected</small>');
+      }
+
+      function subscribe(){
+        if(!ws || ws.readyState!==WebSocket.OPEN) return;
+        if(subId){ try{ ws.send(JSON.stringify(['CLOSE', subId])) }catch(e){} }
+        subId = 'sub_'+Math.random().toString(36).slice(2,9);
+
+        let filter = {};
+        try{
+          const adv = advancedFilterInput.value.trim();
+          if(adv){
+            filter = JSON.parse(adv);
+          } else if(filterKind.value){
+            filter.kinds = [Number(filterKind.value)];
+          }
+        }catch(e){
+          addLogMessage('<small>Invalid advanced filter JSON, fallback to kind filter.</small>');
+          if(filterKind.value){ filter.kinds=[Number(filterKind.value)]; }
+        }
+
+        const msg = ['REQ', subId, filter];
+        ws.send(JSON.stringify(msg));
+        addLogMessage('<small>Subscribed ('+subId+') filter: '+JSON.stringify(filter)+'</small>');
+      }
+
+      function handleMessage(data){
+        if(!Array.isArray(data) || data.length===0) return;
+        const t = data[0];
+        if(t==='EVENT'){
+          const ev = data[2];
+          events.push(ev);
+          renderLog();
+        } else if(t==='NOTICE'){
+          addLogMessage('<div><strong>NOTICE</strong> '+escapeHtml(data[1]||'')+'</div>');
+        } else if(t==='EOSE'){
+          addLogMessage('<div><small>End of stored events for subscription '+escapeHtml(data[1]||'')+'</small></div>');
+        } else if(t==='OK'){
+          addLogMessage('<div><strong>OK</strong> '+escapeHtml(JSON.stringify(data.slice(1)))+'</div>');
+        } else {
+          addLogMessage('<div><small>Message: '+escapeHtml(JSON.stringify(data))+'</small></div>');
+        }
+      }
+
+      function escapeHtml(s){ return String(s).replace(/[&<>\"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":"&#39;"})[c]) }
+      function short(s, n=12){ return s? (s.slice(0,n)+'...') : '' }
+
+      async function tryDerivePubkey(){
+        const pk = privInput.value.trim();
+        if(!pk){ pubInput.value=''; return }
+        try{
+          const pub = nostr.getPublicKey(pk);
+          pubInput.value = pub;
+        }catch(e){ pubInput.value='(invalid)'; }
+      }
+
+      async function publishNote(){
+        if(!connectedRelay){ alert('Not connected to any relay. Connect first.'); return }
+        const content = noteInput.value.trim();
+        if(!content){ alert('Write a note to publish.'); return }
+        const priv = privInput.value.trim();
+        if(!priv){ if(!confirm('No private key provided. This relay may reject unsigned events. Continue?')) return }
+
+        const event = {
+          kind: 1,
+          created_at: Math.floor(Date.now()/1000),
+          tags: [],
+          content
+        };
+
+        if(priv){
+          try{
+            const sk = priv.startsWith('npub') || priv.startsWith('nsec') ? nostr.nip19.decode(priv).data : priv;
+            const hexSk = typeof sk === 'string' ? sk : sk.toString('hex');
+            event.pubkey = nostr.getPublicKey(hexSk);
+            event.id = nostr.getEventHash(event);
+            event.sig = await nostr.signEvent(event, hexSk);
+          }catch(e){ addLogMessage('<small>Failed to sign event: '+e.message+'</small>'); return }
+        }
+
+        try{
+          ws.send(JSON.stringify(['EVENT', event]));
+          addLogMessage('<div><strong>Sent EVENT</strong> id: '+escapeHtml(event.id||'(unsigned)')+' — awaiting OK/NOTICE from relay</div>');
+        }catch(e){ addLogMessage('<small>Failed to send EVENT: '+e.message+'</small>'); }
+      }
+
+      connectBtn.addEventListener('click', ()=>{ connect(); });
+      disconnectBtn.addEventListener('click', ()=>{ disconnect(); });
+      filterKind.addEventListener('change', ()=>{ subscribe(); });
+      advancedFilterInput.addEventListener('change', ()=>{ subscribe(); });
+      privInput.addEventListener('input', ()=>{ tryDerivePubkey(); });
+      publishBtn.addEventListener('click', ()=>{ publishNote(); });
+      clearLogBtn.addEventListener('click', ()=>{ logEl.innerHTML=''; events=[]; });
+      exampleBtn.addEventListener('click', ()=>{ noteInput.value = 'Hello from Minimal Nostr Connector — '+new Date().toLocaleString(); });
+
+      tryDerivePubkey();
+      window._nostrConnector = {connect,disconnect,publishNote};
+    })();
+  </script>
+</body>
+</html>

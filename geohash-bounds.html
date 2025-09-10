@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Geohash Bounding Box Visualizer</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+        #map {
+            height: 80vh;
+            width: 100%;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        input {
+            padding: 8px;
+            font-size: 16px;
+            width: 200px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .info {
+            margin-top: 10px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <input type="text" id="geohash" placeholder="Enter geohash" />
+        <button onclick="visualizeGeohash()">Visualize</button>
+        <div class="info" id="info"></div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        // Initialize the map
+        const map = L.map('map').setView([0, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        let currentBox = null;
+        let currentCenter = null;
+
+        function decodeBounds(geohash) {
+            const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+            let latInterval = [-90.0, 90.0];
+            let lonInterval = [-180.0, 180.0];
+            let isEven = true;
+
+            for (let i = 0; i < geohash.length; i++) {
+                const cd = base32.indexOf(geohash[i].toLowerCase());
+                if (cd === -1) return null; // Invalid character
+
+                for (let mask of [16, 8, 4, 2, 1]) {
+                    if (isEven) {
+                        const mid = (lonInterval[0] + lonInterval[1]) / 2;
+                        if ((cd & mask) !== 0) {
+                            lonInterval[0] = mid;
+                        } else {
+                            lonInterval[1] = mid;
+                        }
+                    } else {
+                        const mid = (latInterval[0] + latInterval[1]) / 2;
+                        if ((cd & mask) !== 0) {
+                            latInterval[0] = mid;
+                        } else {
+                            latInterval[1] = mid;
+                        }
+                    }
+                    isEven = !isEven;
+                }
+            }
+            
+            return {
+                minLat: latInterval[0],
+                maxLat: latInterval[1],
+                minLon: lonInterval[0],
+                maxLon: lonInterval[1]
+            };
+        }
+
+        function visualizeGeohash() {
+            const geohash = document.getElementById('geohash').value.trim();
+            const infoDiv = document.getElementById('info');
+            
+            // Clear previous visualization
+            if (currentBox) map.removeLayer(currentBox);
+            if (currentCenter) map.removeLayer(currentCenter);
+            
+            if (!geohash) {
+                infoDiv.textContent = 'Please enter a geohash';
+                return;
+            }
+
+            const bounds = decodeBounds(geohash);
+            if (!bounds) {
+                infoDiv.textContent = 'Invalid geohash';
+                return;
+            }
+
+            // Create and add the bounding box
+            currentBox = L.rectangle([
+                [bounds.minLat, bounds.minLon],
+                [bounds.maxLat, bounds.maxLon]
+            ], {
+                color: "#ff7800",
+                weight: 2,
+                fillOpacity: 0.2
+            }).addTo(map);
+
+            // Add center marker with label
+            const center = [
+                (bounds.minLat + bounds.maxLat) / 2,
+                (bounds.minLon + bounds.maxLon) / 2
+            ];
+            
+            currentCenter = L.marker(center, {
+                icon: L.divIcon({
+                    className: 'geohash-label',
+                    html: geohash,
+                    iconSize: [60, 20]
+                })
+            }).addTo(map);
+
+            // Zoom to bounds
+            map.fitBounds([
+                [bounds.minLat, bounds.minLon],
+                [bounds.maxLat, bounds.maxLon]
+            ], {
+                padding: [50, 50]
+            });
+
+            // Update info
+            const area = calculateApproximateArea(bounds);
+            infoDiv.innerHTML = `
+                Geohash: ${geohash}<br>
+                Precision: ${geohash.length}<br>
+                Bounds: [${bounds.minLat.toFixed(6)}, ${bounds.minLon.toFixed(6)}] to [${bounds.maxLat.toFixed(6)}, ${bounds.maxLon.toFixed(6)}]<br>
+                Approximate Area: ${area}
+            `;
+        }
+
+        function calculateApproximateArea(bounds) {
+            const latDiff = bounds.maxLat - bounds.minLat;
+            const lonDiff = bounds.maxLon - bounds.minLon;
+            const centerLat = (bounds.maxLat + bounds.minLat) / 2;
+            
+            // Approximate conversion to kilometers (rough estimation)
+            const latKm = latDiff * 111; // 1 degree ≈ 111 km
+            const lonKm = lonDiff * 111 * Math.cos(centerLat * Math.PI / 180);
+            
+            const areaKm2 = latKm * lonKm;
+            
+            if (areaKm2 < 1) {
+                return `${(areaKm2 * 1000000).toFixed(2)} m²`;
+            } else {
+                return `${areaKm2.toFixed(2)} km²`;
+            }
+        }
+
+        // Add enter key support
+        document.getElementById('geohash').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                visualizeGeohash();
+            }
+        });
+    </script>
+</body>
+</html>
