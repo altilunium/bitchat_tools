@@ -42,7 +42,7 @@
         </div>
         <div style="width:230px">
           <label for="filterKind">Subscribe: kind</label>
-          <select id="filterKind"><option value="20000">Kind 20000 (ephemeral)</option><option value="">All</option></select>
+          <select id="filterKind"><option value="20000">Kind 20000 (ephemeral)</option><option value="">All</option><option value="1">Kind 1 (text note)</option><option value="0">Kind 0 (metadata)</option><option value="3">Kind 3 (contacts)</option></select>
         </div>
         <div style="width:120px">
           <label>&nbsp;</label>
@@ -117,12 +117,14 @@
           const time = new Date((ev.created_at||0)*1000).toLocaleString();
           const pubkey = ev.pubkey || '';
           const id = ev.id || '';
+          const usr = ev.tags[1][1] || '';
+          const rum = ev.tags[0][1] || '';
           let content = escapeHtml(ev.content||'');
           const evStr = JSON.stringify(ev,null,2);
           const html = `
             <div class="event">
-              <strong>Event</strong> <small>${time}</small>
-              <div class="meta">id: ${id} — pubkey: ${short(pubkey)}</div>
+              <strong>${rum}</strong> <small>${time}</small>
+              <div class="meta">id: ${usr} — pubkey: ${short(pubkey)}</div>
               <div style="margin-top:6px">${content}</div>
               <button class="ghost" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">Show RAW</button>
               <pre style="display:none">${escapeHtml(evStr)}</pre>
@@ -272,4 +274,3 @@
   </script>
 </body>
 </html>
-
