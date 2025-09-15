@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nostr profile fetcher</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+    body{max-width:860px;margin:28px auto;padding:20px;background:#fbfbfd;color:#111}
+    h1{font-size:20px;margin:0 0 8px}
+    label{display:block;margin-top:12px;font-weight:600}
+    input, textarea, select, button{font:inherit;padding:8px;border:1px solid #ddd;border-radius:8px}
+    textarea{height:68px;width:100%;resize:vertical}
+    .row{display:flex;gap:8px}
+    .col{flex:1}
+    button{cursor:pointer}
+    pre{background:#f2f4f7;padding:12px;border-radius:8px;overflow:auto}
+    .meta{margin-top:12px;padding:12px;border-radius:8px;border:1px solid #eee;background:white}
+    .muted{color:#666;font-size:13px}
+    img.avatar{max-width:96px;border-radius:12px}
+    .status{margin-top:8px;font-size:13px}
+    .relay{font-family:monospace}
+  </style>
+</head>
+<body>
+  <h1>Nostr profile fetcher</h1>
+  <p class="muted">Enter a hex pubkey or an npub (bech32) public key and press Fetch. The page will query a set of relays for the latest kind 0 metadata event and show parsed fields and raw event JSON.</p>
+
+  <label for="pubkey">Public key (hex or npub)</label>
+  <input id="pubkey" placeholder="e.g. npub1... or 32-byte hex" />
+
+  <label for="relays">Relays (one per line)</label>
+  <textarea id="relays">wss://relay.damus.io
+wss://eden.nostr.land
+wss://relay.snort.social
+wss://relay.nostr.info</textarea>
+
+  <div class="row" style="margin-top:10px;">
+    <div class="col">
+      <button id="fetchBtn">Fetch</button>
+      <button id="clearBtn" style="margin-left:8px">Clear</button>
+    </div>
+    <div style="width:220px;text-align:right;align-self:center" class="muted">Timeout per relay: <input id="timeout" value="5000" style="width:80px;text-align:right"/> ms</div>
+  </div>
+
+  <div id="status" class="status muted"></div>
+
+  <div id="result" class="meta" style="display:none">
+    <div style="display:flex;gap:12px;align-items:flex-start">
+      <div style="flex:1">
+        <div id="displayName" style="font-weight:700;font-size:18px"></div>
+        <div id="about" class="muted" style="margin-top:6px"></div>
+        <div style="margin-top:8px"><span class="muted">nip05:</span> <span id="nip05"></span></div>
+        <div style="margin-top:8px"><span class="muted">raw pubkey:</span> <code id="hexpub" class="relay"></code></div>
+        <div style="margin-top:8px"><span class="muted">fetched from relay:</span> <span id="fromRelay" class="relay"></span></div>
+      </div>
+      <div style="width:110px;text-align:center">
+        <img id="avatar" class="avatar" src="" alt="avatar" onerror="this.style.display='none'" />
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="muted">Parsed metadata (JSON)</div>
+      <pre id="metaJSON">{}</pre>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="muted">Raw event(s) received</div>
+      <pre id="rawEvents">[]</pre>
+    </div>
+  </div>
+
+  <script>
+    // Minimal bech32 decode for npub -> hex. This is a compact implementation derived from public domain references.
+    function bech32Decode(bech) {
+      try {
+        const ALPHABET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+        const pos = bech.lastIndexOf('1');
+        if (pos === -1) return null;
+        const prefix = bech.slice(0,pos);
+        const data = bech.slice(pos+1);
+        const bytes = [];
+        for (let i=0;i<data.length;i++) {
+          const v = ALPHABET.indexOf(data[i]);
+          if (v === -1) return null;
+          bytes.push(v);
+        }
+        // convert 5-bit groups to 8-bit bytes
+        const bits = []; for (let i=0;i<bytes.length;i++) for (let b=4;b>=0;b--) bits.push((bytes[i]>>b)&1);
+        // drop the 0 padding to make full bytes
+        const out = [];
+        for (let i=0;i+7<bits.length;i+=8) {
+          let v=0; for (let j=0;j<8;j++) v=(v<<1)|bits[i+j];
+          out.push(v);
+        }
+        // hex
+        return out.map(b=>b.toString(16).padStart(2,'0')).join('');
+      } catch(e){return null}
+    }
+
+    function normalizePubkey(input) {
+      input = (input||'').trim();
+      if (!input) return null;
+      if (/^[0-9a-fA-F]{64}$/.test(input)) return input.toLowerCase();
+      if (input.startsWith('npub')) {
+        const dec = bech32Decode(input);
+        if (dec && dec.length>=64) return dec.slice(0,64);
+      }
+      // not recognized
+      return null;
+    }
+
+    function parseEventContent(evt) {
+      try {
+        return JSON.parse(evt.content||'{}');
+      } catch(e){
+        return { _raw_content: evt.content };
+      }
+    }
+
+    function mostRecent(events) {
+      if (!events || events.length===0) return null;
+      events.sort((a,b)=> (b.created_at||0) - (a.created_at||0));
+      return events[0];
+    }
+
+    document.getElementById('fetchBtn').addEventListener('click', async ()=>{
+      const raw = document.getElementById('pubkey').value;
+      const hex = normalizePubkey(raw);
+      const status = document.getElementById('status');
+      const result = document.getElementById('result');
+      result.style.display='none';
+      if (!hex) { status.textContent = 'Invalid public key. Enter a 64-hex pubkey or an npub...'; return; }
+      const relays = document.getElementById('relays').value.split('\n').map(s=>s.trim()).filter(Boolean);
+      if (relays.length===0) { status.textContent = 'Add at least one relay URL.'; return; }
+      status.textContent = 'Querying relays...';
+
+      const timeoutPerRelay = Number(document.getElementById('timeout').value) || 5000;
+
+      // For each relay open WS, send REQ, collect any kind 0 events for this author
+      const allEvents = [];
+      const relayResults = [];
+
+      await Promise.all(relays.map(relayUrl=> new Promise(resolve=>{
+        let ws;
+        try { ws = new WebSocket(relayUrl); } catch(e){ relayResults.push({relay:relayUrl,error:String(e)}); return resolve(); }
+        let settled = false;
+        const t = setTimeout(()=>{
+          if (!settled) { settled = true; try{ ws.close(); }catch(_){} relayResults.push({relay:relayUrl,error:'timeout'}); resolve(); }
+        }, timeoutPerRelay);
+
+        ws.addEventListener('open', ()=>{
+          // send subscription
+          const req = ['REQ','sub-'+Math.random().toString(36).slice(2),{kinds:[0],authors:[hex]}];
+          ws.send(JSON.stringify(req));
+        });
+        ws.addEventListener('message', ev=>{
+          try {
+            const msg = JSON.parse(ev.data);
+            if (!Array.isArray(msg)) return;
+            const tp = msg[0];
+            if (tp === 'EVENT') {
+              const evt = msg[2];
+              if (evt && evt.kind===0 && evt.pubkey && evt.pubkey.toLowerCase()===hex.toLowerCase()) {
+                allEvents.push(Object.assign({}, evt, {relay:relayUrl}));
+              }
+            } else if (tp === 'EOSE') {
+              // end of stream
+              if (!settled) { settled = true; clearTimeout(t); try{ ws.close(); }catch(_){} relayResults.push({relay:relayUrl,ok:true}); resolve(); }
+            }
+          } catch(e) {
+            // ignore
+          }
+        });
+        ws.addEventListener('error', ()=>{ if (!settled) { settled = true; clearTimeout(t); relayResults.push({relay:relayUrl,error:'websocket error'}); try{ ws.close(); }catch(_){} resolve(); } });
+        ws.addEventListener('close', ()=>{ if (!settled) { settled = true; clearTimeout(t); relayResults.push({relay:relayUrl,ok:true}); resolve(); } });
+      })));
+
+      if (allEvents.length===0) {
+        status.textContent = 'No metadata (kind 0) events found on the queried relays.';
+        return;
+      }
+
+      // pick most recent
+      const picked = mostRecent(allEvents);
+      const parsed = parseEventContent(picked);
+
+      document.getElementById('displayName').textContent = parsed.name || parsed.displayName || parsed.username || '(no name)';
+      document.getElementById('about').textContent = parsed.about || '';
+      document.getElementById('nip05').textContent = parsed.nip05 || '';
+      document.getElementById('hexpub').textContent = picked.pubkey;
+      document.getElementById('fromRelay').textContent = picked.relay;
+      const avatar = document.getElementById('avatar');
+      if (parsed.picture) { avatar.src = parsed.picture; avatar.style.display='block'; } else { avatar.style.display='none'; }
+      document.getElementById('metaJSON').textContent = JSON.stringify(parsed, null, 2);
+      document.getElementById('rawEvents').textContent = JSON.stringify(allEvents.map(e=>({created_at:e.created_at, id:e.id, relay:e.relay, content:e.content})), null, 2);
+
+      result.style.display = 'block';
+      status.textContent = 'Done. Showing the most recent kind 0 event across relays.';
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', ()=>{
+      document.getElementById('pubkey').value='';
+      document.getElementById('status').textContent='';
+      document.getElementById('result').style.display='none';
+    });
+  </script>
+</body>
+</html>
