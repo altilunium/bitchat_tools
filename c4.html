@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nostr Ephemeral Chat (Kind 20000)</title>
+    <script src="https://unpkg.com/nostr-tools/lib/nostr.bundle.js"></script>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --surface-color: #1e1e1e;
+            --primary-color: #bb86fc;
+            --secondary-color: #03dac6;
+            --text-color: #e0e0e0;
+            --border-color: #333;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        h1 {
+            text-align: center;
+            color: var(--primary-color);
+            margin-top: 0;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            max-width: 800px;
+            margin: 0 auto;
+            width: 100%;
+            height: 100%;
+        }
+        .controls, .chat-input {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background-color: var(--surface-color);
+            color: var(--text-color);
+            font-size: 1rem;
+        }
+        button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            background-color: var(--primary-color);
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #a052f5;
+        }
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+        #chat-area {
+            flex-grow: 1;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 1rem;
+            overflow-y: auto;
+            background-color: var(--surface-color);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .status {
+            font-size: 0.9rem;
+            color: #aaa;
+            text-align: center;
+            padding-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Ephemeral Nostr Chat</h1>
+    
+    <div class="controls">
+        <input type="text" id="username" placeholder="Enter your username">
+        <input type="text" id="room" placeholder="Enter room code (e.g., 'qq')">
+        <button id="joinBtn">Join / Change Room</button>
+    </div>
+
+    <div class="status" id="status-line">Generating temporary keys... Please set username and join a room.</div>
+
+    <div id="chat-area">Welcome! Join a room to start chatting.</div>
+
+    <div class="chat-input">
+        <input type="text" id="message" placeholder="Type your message..." disabled>
+        <button id="sendBtn" disabled>Send</button>
+    </div>
+</div>
+
+<script>
+    // --- DOM Elements ---
+    const usernameInput = document.getElementById('username');
+    const roomInput = document.getElementById('room');
+    const joinBtn = document.getElementById('joinBtn');
+    const statusLine = document.getElementById('status-line');
+    const chatArea = document.getElementById('chat-area');
+    const messageInput = document.getElementById('message');
+    const sendBtn = document.getElementById('sendBtn');
+
+    // --- Nostr Setup ---
+    const RELAYS = ['wss://nostr-02.dorafactory.org'];
+    /*
+    const RELAYS = [
+        'wss://relay.damus.io',
+        'wss://relay.snort.social',
+        'wss://nos.lol',
+        'wss://nostr.wine',
+    ];*/
+
+    let sk, pk; // Private and Public keys
+    let pool;
+    let currentSub = null;
+    let currentRoom = null;
+
+    // --- Core Functions ---
+
+    /**
+     * Initializes the application state on load
+     */
+    async function initialize() {
+        // 1. Generate ephemeral keys for the session
+        // CORRECTED: Call functions from the NostrTools object
+        sk = window.NostrTools.generateSecretKey();
+        pk = window.NostrTools.getPublicKey(sk);
+        
+        const npub = NostrTools.nip19.npubEncode(pk);
+        statusLine.textContent = `Connected with temp ID: ${npub.substring(0, 12)}...`;
+
+        // 2. Connect to relays
+        pool = new NostrTools.SimplePool();
+        /*
+        await Promise.any(pool.ensureConnections(RELAYS));
+        */
+    }
+    
+    /**
+     * Clears and subscribes to a new chat room
+     */
+    function joinRoom() {
+        pool = new NostrTools.SimplePool();
+        const roomCode = roomInput.value.trim();
+        const username = usernameInput.value.trim();
+
+        if (!roomCode || !username) {
+            alert('Please enter both a username and a room code.');
+            return;
+        }
+        
+        // Unsubscribe from the old room if we're switching
+        if (currentSub) {
+            currentSub.unsub();
+        }
+
+        currentRoom = roomCode;
+        chatArea.innerHTML = ''; // Clear chat history
+        addMessageToBox(`Joining room: "${roomCode}" as "${username}"...`, 'system');
+
+        // Create a filter to get past and future messages for the room
+        const filter = {
+            kinds: [20000],
+            '#g': [roomCode],
+            limit: 100 // Get some recent history
+        };
+
+        currentSub = pool.subscribe(['wss://nostr-02.dorafactory.org'],
+              {
+                          kinds: [20000],
+                          '#g': [roomCode],
+                          limit: 100 // Get some recent history
+                      },
+            {onevent(event) {
+                const eventUsernameTag = event.tags.find(tag => tag[0] === 'n');
+            const eventUsername = eventUsernameTag ? eventUsernameTag[1] : `anon-${event.pubkey.substring(0, 6)}`;
+            const ts = new Date((event.created_at||0)*1000).toLocaleString();
+            
+            const message = event.content;
+            addMessageToBox(`${ts} | ${eventUsername}: ${message}`, 'user');
+            }}  
+
+            );
+
+       
+        
+   
+
+        // Enable chat inputs
+        messageInput.disabled = false;
+        sendBtn.disabled = false;
+        statusLine.textContent = `You are in room: "${roomCode}"`;
+    }
+
+    /**
+     * Sends a chat message to the current room
+     */
+    async function sendMessage() {
+        const content = messageInput.value.trim();
+        const username = usernameInput.value.trim();
+        
+        if (!content || !username || !currentRoom) {
+            alert('Cannot send message. Ensure you have a username and have joined a room.');
+            return;
+        }
+
+        // Create the event object
+        const event = {
+            kind: 20000,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+                ['g', currentRoom], // Room code tag
+                ['n', username]     // Username tag
+            ],
+            content: content,
+            pubkey: pk
+        };
+
+        // Sign the event
+        // CORRECTED: Call functions from the NostrTools object
+        /*
+        event.id = NostrTools.getEventHash(event);
+        event.sig = NostrTools.getSignature(event, sk);
+        */
+        signedEvent = window.NostrTools.finalizeEvent(event,sk)
+
+        // Publish the event to all relays
+        const pubs = pool.publish(RELAYS, event);
+        
+        // Optional: wait for at least one confirmation
+        await Promise.any(pubs);
+        
+        messageInput.value = ''; // Clear input field after sending
+    }
+
+    /**
+     * Helper to display messages in the chat box
+     */
+    function addMessageToBox(message, type = 'user') {
+        const messageElement = document.createElement('div');
+        messageElement.textContent = message;
+        if (type === 'system') {
+            messageElement.style.color = 'var(--secondary-color)';
+            messageElement.style.fontStyle = 'italic';
+        }
+        chatArea.appendChild(messageElement);
+        // Auto-scroll to the bottom
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    // --- Event Listeners ---
+    joinBtn.addEventListener('click', joinRoom);
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    });
+
+    // Start the app
+    document.addEventListener('DOMContentLoaded', initialize);
+</script>
+</body>
+</html>
